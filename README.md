@@ -25,11 +25,19 @@
 
 ## Install
 
+**From npm** — published as [`@fallnstrelitzia/dsh-chat-settings`](https://www.npmjs.com/package/@fallnstrelitzia/dsh-chat-settings):
+
 ```sh
 dsh plugin --profile <profile> add @fallnstrelitzia/dsh-chat-settings
 ```
 
-Or install from a checkout: point `dependencies` at this directory with `link:` and add the package name to `dsh.profile.bundles`.
+Or install the package itself with `npm i @fallnstrelitzia/dsh-chat-settings`.
+
+**从 npm 安装**：运行上面的 `dsh plugin add`，或直接 `npm i @fallnstrelitzia/dsh-chat-settings`。
+
+**From a checkout** — point `dependencies` in the profile `package.json` at this directory with `link:` and add the package name to `dsh.profile.bundles`.
+
+**从本地目录安装**：把 profile `package.json` 的依赖写成 `"@fallnstrelitzia/dsh-chat-settings": "link:<this-dir>"`，并把包名加入 `dsh.profile.bundles`。
 
 ## Use
 
