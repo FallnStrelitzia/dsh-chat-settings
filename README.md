@@ -9,7 +9,8 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="MIT License" /></a>
-  <a href="package.json"><img src="https://img.shields.io/badge/version-1.1.0-0891b2?style=flat-square" alt="Version 1.1.0" /></a>
+  <a href="https://www.npmjs.com/package/@fallnstrelitzia/dsh-chat-settings"><img src="https://img.shields.io/npm/v/@fallnstrelitzia/dsh-chat-settings?style=flat-square&color=0891b2" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@fallnstrelitzia/dsh-chat-settings"><img src="https://img.shields.io/npm/dm/@fallnstrelitzia/dsh-chat-settings?style=flat-square&color=0ea5e9" alt="npm downloads" /></a>
   <a href="https://github.com/topics/dsh-plugin"><img src="https://img.shields.io/badge/topic-dsh--plugin-8b5cf6?style=flat-square" alt="dsh-plugin topic" /></a>
   <a href="https://github.com/FallnStrelitzia/dsh-chat-settings"><img src="https://img.shields.io/badge/host-DeepSeek%20Harness-2f6fed?style=flat-square" alt="DeepSeek Harness" /></a>
 </p>
