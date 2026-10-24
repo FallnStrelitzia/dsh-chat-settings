@@ -1,5 +1,5 @@
 /**
- * @local/dsh-chat-settings — Client half.
+ * @fallnstrelitzia/dsh-chat-settings — Client half.
  *
  * Adds a per-conversation settings dialog next to the Session title (only in
  * Workspaces the user checked) and a "Chat settings" page in Settings that owns
@@ -13,7 +13,7 @@
  */
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-chat-settings',
+  id: '@fallnstrelitzia/dsh-chat-settings',
   factory(require) {
     const React = require('react')
     const { Fragment, useEffect, useRef, useState } = React
@@ -783,7 +783,7 @@ window.__ModuleLoader__.load({
 
         ctx.effect(() => {
           const style = document.createElement('style')
-          style.dataset.plugin = '@local/dsh-chat-settings'
+          style.dataset.plugin = '@fallnstrelitzia/dsh-chat-settings'
           style.textContent = CSS
           document.head.appendChild(style)
           return () => {
