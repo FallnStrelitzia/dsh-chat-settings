@@ -1,6 +1,6 @@
 - insert:
     - id: chat-settings
-      name: '@local/dsh-chat-settings'
+      name: '@fallnstrelitzia/dsh-chat-settings'
 # The pure-chat preset ships with the plugin so removing the plugin also removes
 # the preset row; nothing is left behind in the profile patch.
 - insert:
