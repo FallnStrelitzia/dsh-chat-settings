@@ -1,0 +1,21 @@
+- insert:
+    - id: chat-settings
+      name: '@local/dsh-chat-settings'
+# The pure-chat preset ships with the plugin so removing the plugin also removes
+# the preset row; nothing is left behind in the profile patch.
+- insert:
+    - id: preset-chat-settings-pure-chat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: chat-settings-pure-chat
+        order: 99
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are a helpful assistant.
+
+                {{chat_settings_instructions}}
+              complete: true
+              includeRuntimeContext: false

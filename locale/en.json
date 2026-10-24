@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Per-Conversation Settings",
+    "description": "Give every conversation its own system prompt, context-turn budget and sampling overrides, and open a dedicated empty chat workspace in one click."
+  }
+}
