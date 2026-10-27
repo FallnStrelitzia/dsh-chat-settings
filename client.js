@@ -23,8 +23,6 @@ window.__ModuleLoader__.load({
     const SETTINGS_PATH = 'api/chat-settings'
     const WORKSPACE_PATH = 'api/chat-settings/workspace'
     const WORKSPACES_PATH = 'api/chat-settings/workspaces'
-    const PURE_CHAT_PATH = 'api/chat-settings/pure-chat'
-    const MIGRATE_PATH = 'api/chat-settings/migrate-pure-chat'
 
     const en = {
       open: 'Chat settings',
@@ -41,8 +39,7 @@ window.__ModuleLoader__.load({
       maxTokens: 'Max output tokens',
       maxTokensHint: 'Leave empty for the model default.',
       pureChat: 'Pure chat mode',
-      pureChatHint: 'Switch this conversation to a persona-only preset: no tools, no environment context, far fewer request tokens.',
-      pureChatFailed: 'Settings saved, but switching the mode failed:',
+      pureChatHint: 'Assemble this conversation with only its own instructions: no tools, no environment context, far fewer request tokens.',
       save: 'Save',
       saving: 'Saving…',
       cancel: 'Cancel',
@@ -64,14 +61,6 @@ window.__ModuleLoader__.load({
       toggleFailed: 'Could not save the Workspace switch.',
       checkAll: 'Enable all',
       uncheckAll: 'Disable all',
-      migrate: 'Move chat sessions to standard',
-      migrating: 'Migrating…',
-      migrateHint: 'Move every pure-chat conversation back to standard mode, so it still opens after this plugin is removed.',
-      migrateDone: 'Migrated',
-      migrateLive: 'live ',
-      migrateCold: 'cold ',
-      migrateFailedCount: 'failed ',
-      migrateFailed: 'Migration failed:',
     }
 
     const zh = {
@@ -89,8 +78,7 @@ window.__ModuleLoader__.load({
       maxTokens: '最大输出 Token',
       maxTokensHint: '留空则使用模型默认值。',
       pureChat: '纯聊天模式',
-      pureChatHint: '把这个对话切到无工具的 persona preset：不加载工具和环境上下文，请求 token 大幅下降。',
-      pureChatFailed: '设置已保存，但切换模式失败：',
+      pureChatHint: '只保留本对话的指令来组装请求：不加载工具和环境上下文，请求 token 大幅下降。',
       save: '保存',
       saving: '保存中…',
       cancel: '取消',
@@ -112,14 +100,6 @@ window.__ModuleLoader__.load({
       toggleFailed: '无法保存工作区开关。',
       checkAll: '全部启用',
       uncheckAll: '全部关闭',
-      migrate: '迁移纯聊天会话',
-      migrating: '迁移中…',
-      migrateHint: '把纯聊天会话迁回标准模式，卸载插件后它们仍能正常打开',
-      migrateDone: '已迁移',
-      migrateLive: '活跃 ',
-      migrateCold: '冷会话 ',
-      migrateFailedCount: '失败 ',
-      migrateFailed: '迁移失败：',
     }
 
     const CSS = [
@@ -174,7 +154,6 @@ window.__ModuleLoader__.load({
       '.dshcs-foot.compact{justify-content:center;width:42px;padding:0}',
       '.dshcs-foot:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}',
       '.dshcs-foot:disabled{opacity:.55;cursor:default}',
-      '.dshcs-foot-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dshcs-ws{display:flex;align-items:center;gap:10px;padding:7px 0;cursor:pointer}',
       '.dshcs-ws input{width:14px;height:14px;accent-color:var(--dsw-alias-brand-primary);cursor:pointer;flex:none}',
       '.dshcs-ws-body{display:flex;flex-direction:column;gap:1px;min-width:0}',
@@ -183,7 +162,6 @@ window.__ModuleLoader__.load({
       '.dshcs-ws-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0 2px}',
       '.dshcs-ws-group{display:flex;gap:6px}',
       '.dshcs-section{display:flex;flex-direction:column;min-width:0}',
-      '.dshcs-detail{display:inline-flex;align-items:center;gap:8px}',
       '.dshcs-check{display:flex;align-items:flex-start;gap:10px;margin-top:18px;cursor:pointer}',
       '.dshcs-check input{margin-top:3px;width:14px;height:14px;flex:none;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}',
     ].join('')
@@ -303,7 +281,6 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = useState(false)
       const [error, setError] = useState(null)
       const [notice, setNotice] = useState(false)
-      const [initialPureChat, setInitialPureChat] = useState(false)
       const closeRef = useRef(null)
 
       useEffect(() => {
@@ -315,7 +292,6 @@ window.__ModuleLoader__.load({
             if (!alive) return
             const next = toDraft(payload.settings)
             setDraft(next)
-            setInitialPureChat(next.pureChat)
             setStatus('ready')
           })
           .catch((reason) => {
@@ -368,20 +344,7 @@ window.__ModuleLoader__.load({
           })
           setDraft(toDraft(payload.settings))
           if (typeof onSaved === 'function') onSaved(payload.configured === true)
-          if (parsed.settings.pureChat !== initialPureChat) {
-            try {
-              await requestJson(PURE_CHAT_PATH, {
-                method: 'POST',
-                body: JSON.stringify({ sessionId, enabled: parsed.settings.pureChat }),
-              })
-              setInitialPureChat(parsed.settings.pureChat)
-              setNotice(true)
-            } catch (reason) {
-              setError(`${t('pureChatFailed')} ${reason instanceof Error ? reason.message : String(reason)}`)
-            }
-          } else {
-            setNotice(true)
-          }
+          setNotice(true)
         } catch (reason) {
           setError(`${t('saveFailed')} ${reason instanceof Error ? reason.message : String(reason)}`)
         } finally {
@@ -730,52 +693,6 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    /** Detail-page action: detach pure-chat Sessions before uninstalling. */
-    function PluginsDetailAction(props) {
-      const { t, subject } = props
-      const [busy, setBusy] = useState(false)
-      const [message, setMessage] = useState(null)
-      let owns = false
-      try {
-        owns = JSON.stringify(subject ?? {}).includes('chat-settings')
-      } catch {
-        owns = false
-      }
-      if (!owns) return null
-      const run = async () => {
-        if (busy) return
-        setBusy(true)
-        setMessage(null)
-        try {
-          const payload = await requestJson(MIGRATE_PATH, { method: 'POST', body: '{}' })
-          const failed = Array.isArray(payload.failed) ? payload.failed : []
-          const parts = [
-            t('migrateDone'),
-            `${t('migrateLive')}${payload.migrated ?? 0}`,
-            `${t('migrateCold')}${payload.detached ?? 0}`,
-            `${t('migrateFailedCount')}${failed.length}`,
-          ]
-          if (failed.length > 0) parts.push(String(failed[0]))
-          setMessage(parts.join(' · '))
-        } catch (reason) {
-          setMessage(`${t('migrateFailed')} ${reason instanceof Error ? reason.message : String(reason)}`)
-        } finally {
-          setBusy(false)
-        }
-      }
-      return h('span', { className: 'dshcs-detail' }, [
-        h('button', {
-          key: 'action',
-          type: 'button',
-          className: 'dshcs-head',
-          title: t('migrateHint'),
-          disabled: busy,
-          onClick: run,
-        }, busy ? t('migrating') : t('migrate')),
-        message !== null ? h('span', { key: 'msg', className: 'dshcs-hint' }, message) : null,
-      ])
-    }
-
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
@@ -841,15 +758,6 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => face,
         }, ChatSettingsSection))
-
-        // Uninstall-safe: the plugin detail page offers a one-click migration of
-        // pure-chat Sessions back to standard before the plugin is removed.
-        ctx.slots.inject('plugins.detail.actions', () => ctx.slots.register({
-          name: 'plugins.detail.actions',
-          id: 'chat-settings-migrate',
-          order: 10,
-          locale: NS,
-        }, PluginsDetailAction))
       },
     }
   },

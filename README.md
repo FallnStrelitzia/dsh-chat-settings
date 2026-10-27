@@ -21,7 +21,7 @@
 |---|---|
 | A system prompt that belongs to one conversation only. | Keep the latest N turns; older ones fold into a single notice. |
 | **Pure chat mode** | **Workspace opt-in** |
-| Persona-only preset with no tools and no runtime context — a short greeting costs a fraction of the standard agent. | The settings button only appears in workspaces you check in Settings. |
+| Assemble the conversation with only its own instructions: no tools, no runtime context — a short greeting costs a fraction of the standard agent. | The settings button only appears in workspaces you check in Settings. |
 
 ## Install
 
@@ -47,35 +47,38 @@ Or install the package itself with `npm i @fallnstrelitzia/dsh-chat-settings`.
    对话标题旁、新会话行会出现 **对话设置** 按钮。
 3. Set the prompt, context turns and optional sampling values, then save.  
    填写提示词、上下文条数、可选采样参数并保存。
-4. Tick **Pure chat mode** to switch that conversation to the persona-only preset; untick to switch back.  
-   勾选 **纯聊天模式** 切到纯人设 preset，取消勾选切回原模式。
+4. Tick **Pure chat mode** to assemble that conversation without tools or runtime context; untick to return to the standard prompt.  
+   勾选 **纯聊天模式**，该对话的请求只保留自己的指令、不加载工具和环境上下文；取消勾选回到标准系统提示。
 
 <details>
 <summary>What pure chat mode changes / 纯聊天模式改了什么</summary>
 
-The conversation moves to `chat-settings-pure-chat`, a preset that mounts only a persona. No tools are offered to the model, and the plugin denies every globally registered tool inside that agent's scope. The system prompt is one persona line plus your instructions, filled in through a prompt variable at render time.
+Pure chat is assembled at request time, not by switching presets. The plugin keeps only this conversation's instructions in the system prompt, clears the tool declarations on every request, and filters runtime context, skill catalog, workspace instructions and time readings out of the request. Nothing is written to the Session log, so removing the plugin leaves no Session pointing at a plugin-owned identity.
 
-该对话切到 `chat-settings-pure-chat` preset：只挂一个人设，不给模型任何工具，并在该 agent 作用域内拒绝所有全局工具。系统提示只有一句人设加你的指令，指令通过提示词变量在渲染时填入。
+纯聊天在请求组装时完成，不切换 preset：系统提示只保留本对话的指令，每次请求都不携带工具声明，runtime 上下文、skill 目录、工作区指令和时间读数在请求里被过滤掉。这些都不写进会话日志，因此卸载插件不会留下指向插件私有身份的会话。
+
+Leaving pure chat restores the full prompt and tool list on the next request. If a conversation refuses tool calls after the switch, open a new conversation: DSH's tool ledger treats a series that starts without tools as having no reusable baseline.
+
+关闭纯聊天后的下一次请求会带回完整系统提示和工具列表。如果切换后该对话仍拒绝工具调用，开一个新对话即可——DSH 的工具账本会把“一开始就没有工具”的请求系列视为没有可复用基线。
 
 </details>
 
 ## Uninstall
 
-Pure-chat conversations record the preset id in their log header, so before removing the plugin either:
+Nothing to migrate. Pure chat is a request-time override: the Session log never records a plugin-owned preset, so removing the plugin simply returns every conversation to the standard prompt and tools. Plugin data lives in `$DSH_HOME/chat-settings/settings.json` and can be deleted by hand.
 
-- open the plugin detail page and click **Move chat sessions to standard**, or
-- open each pure-chat conversation and untick the mode.
+不需要迁移。纯聊天是请求期覆盖：会话日志从不记录插件私有的 preset，卸载插件后所有对话直接回到标准系统提示和工具。插件数据位于 `$DSH_HOME/chat-settings/settings.json`，可以直接删除。
 
-Removing the plugin also detaches cold conversations automatically. Plugin data lives in `$DSH_HOME/chat-settings/settings.json`.
+Older versions (1.1.x and below) did switch pure-chat Sessions to a preset. On first start, 1.2.0 appends a final `standard` selection to any such Session log once; the preset identity is never registered again.
 
-纯聊天会话会在日志头记录 preset id，卸载前请先在插件详情页点 **迁移纯聊天会话**，或逐个打开对话取消纯聊天模式。卸载时未打开的会话也会自动改回标准模式。插件数据位于 `$DSH_HOME/chat-settings/settings.json`。
+旧版本（1.1.x 及以下）会把纯聊天会话切到一个 preset。1.2.0 首次启动时会给这类会话日志追加一条最终的 `standard` 选择，之后不再注册那个 preset。
 
 ## Package layout
 
 ```
 index.js            Host half: storage, HTTP routes, prompt/context/tools hooks
-client.js           Client half: settings dialog, settings page, detail action
-cordis.patch.yml    Loader patch: the plugin row and its pure-chat preset
+client.js           Client half: settings dialog and settings page
+cordis.patch.yml    Loader patch: the plugin row
 locale/             UI strings
 icon.svg            Plugin icon
 icon-180.png        Storefront icon
@@ -86,6 +89,12 @@ icon-180.png        Storefront icon
 Not a general chat client, not a theme, not a replacement for DSH's own sessions. It only shapes how one conversation is assembled before the model is called.
 
 不是通用聊天客户端，不是主题，也不替代 DSH 自己的会话管理——它只决定一个对话在调用模型前如何组装。
+
+## Acknowledgements
+
+The request-time pure-chat approach — suppressing prompt sections, tool declarations, runtime context and time readings instead of switching presets — was informed by [dsh-persona-select](https://github.com/gosutry/dsh-persona-select) by gosutry. Its use of `systemPrompt.suppressRuntimeContext()` and its `agent/pre-step` filtering pattern shaped this implementation.
+
+纯聊天的请求期屏蔽方案（不切换 preset，而是在组装请求时压掉系统提示段、工具声明、runtime 上下文和时间读数）参考了 [dsh-persona-select](https://github.com/gosutry/dsh-persona-select)。它的 `systemPrompt.suppressRuntimeContext()` 用法和 `agent/pre-step` 过滤方式影响了这里的实现。
 
 ## License
 

@@ -1,8 +1,8 @@
 {
   "name": "@fallnstrelitzia/dsh-chat-settings",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "type": "module",
-  "description": "Per-conversation system prompt, context folding, sampling overrides and a low-token pure-chat mode, plus a dedicated empty chat workspace.",
+  "description": "Per-conversation system prompt, context folding, sampling overrides and a runtime pure-chat mode, plus a dedicated empty chat workspace.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/FallnStrelitzia/dsh-chat-settings.git"

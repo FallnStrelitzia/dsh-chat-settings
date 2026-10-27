@@ -22,8 +22,6 @@ const PLUGIN = 'chat-settings'
 const SETTINGS_ROUTE = '/api/chat-settings'
 const WORKSPACE_ROUTE = '/api/chat-settings/workspace'
 const WORKSPACES_ROUTE = '/api/chat-settings/workspaces'
-const PURE_CHAT_ROUTE = '/api/chat-settings/pure-chat'
-const MIGRATE_ROUTE = '/api/chat-settings/migrate-pure-chat'
 const PROMPT_SECTION = 'chat-settings:conversation-instructions'
 const PLACEHOLDER_PREFIX = 'chat-settings-fold-'
 const MAX_PROMPT_CHARS = 20_000
@@ -32,13 +30,11 @@ const MAX_OUTPUT_TOKENS = 262_144
 // Near the end of the assembled system prompt: later sections weigh more on the
 // model than earlier ones, and this text is supposed to win over defaults.
 const PROMPT_ORDER = 900
-// A persona-only preset for "pure chat" Sessions: no tools, no runtime context.
-const PURE_CHAT_PRESET = 'chat-settings-pure-chat'
-const FALLBACK_PRESET = 'standard'
-// The persona is `complete`, so this variable is the one channel that reaches
-// its rendered system prompt without dragging every deployment section back in.
-const PURE_CHAT_VARIABLE = 'chat_settings_instructions'
-const PURE_CHAT_VARIABLE_TEMPLATE = `{{${PURE_CHAT_VARIABLE}}}`
+// Pure chat is assembled at request time. The old preset identity survives only
+// so the one-time repair can find Sessions written by older versions.
+const LEGACY_PURE_CHAT_PRESET = 'chat-settings-pure-chat'
+const STATE_VERSION = 3
+const STRIPPED_SOURCE_KINDS = new Set(['agent-instructions', 'time-context'])
 
 const DEFAULT_SETTINGS = Object.freeze({
   systemPrompt: '',
@@ -46,7 +42,6 @@ const DEFAULT_SETTINGS = Object.freeze({
   temperature: null,
   maxTokens: null,
   pureChat: false,
-  previousPreset: null,
 })
 
 export const inject = ['agents', 'sessions']
@@ -64,7 +59,7 @@ function stateFile() {
 }
 
 function emptyState() {
-  return { version: 2, sessions: {}, workspaces: {}, chatWorkspacePath: undefined }
+  return { version: STATE_VERSION, sessions: {}, workspaces: {}, chatWorkspacePath: undefined }
 }
 
 /** One stable key for a workspace directory across separator and case noise. */
@@ -89,7 +84,6 @@ function normalizeSettings(input, base = DEFAULT_SETTINGS) {
     temperature: base.temperature,
     maxTokens: base.maxTokens,
     pureChat: base.pureChat === true,
-    previousPreset: base.previousPreset ?? null,
   }
   if (!isPlainObject(input)) return next
   if (typeof input.systemPrompt === 'string') {
@@ -111,9 +105,6 @@ function normalizeSettings(input, base = DEFAULT_SETTINGS) {
     next.maxTokens = clamp(Math.round(input.maxTokens), 1, MAX_OUTPUT_TOKENS)
   }
   if (typeof input.pureChat === 'boolean') next.pureChat = input.pureChat
-  if (typeof input.previousPreset === 'string') next.previousPreset = input.previousPreset
-  else if (input.previousPreset === null) next.previousPreset = null
-  else next.previousPreset = base.previousPreset ?? null
   return next
 }
 
@@ -132,6 +123,9 @@ function loadState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
     const state = emptyState()
+    // A document written before the runtime pure-chat change carries version 2
+    // and still needs the one-time Session repair.
+    state.version = Number.isInteger(parsed?.version) ? parsed.version : 2
     if (isPlainObject(parsed?.sessions)) {
       for (const [sessionId, value] of Object.entries(parsed.sessions)) {
         if (typeof sessionId === 'string' && isPlainObject(value)) {
@@ -411,33 +405,6 @@ export function apply(ctx) {
     return store.isWorkspaceEnabled(sessionDirectory(session))
   }
 
-  /** Latest Agent that requested a step; the persona variable has no Agent arg. */
-  let lastAgent
-
-  /** Instructions for whoever is assembling a prompt right now. */
-  const resolveInstructions = () => {
-    let agent
-    try {
-      agent = ctx.agents.currentInitiator() ?? lastAgent
-    } catch {
-      agent = lastAgent
-    }
-    if (agent === undefined) return ''
-    const session = ctx.sessions.get(agent.id)
-    if (session === undefined) return ''
-    const settings = store.settingsFor(agent.id)
-    if (isDefaultSettings(settings) && !store.isWorkspaceEnabled(sessionDirectory(session))) return ''
-    return promptAddendum(settings)
-  }
-
-  /** Persona prefixes are strict: the variable must exist before assembly. */
-  ctx.inject(['systemPrompt'], (scope) => {
-    scope.effect(
-      () => scope.systemPrompt.variable(PURE_CHAT_VARIABLE, () => resolveInstructions()),
-      `${PLUGIN}: prompt variable`,
-    )
-  })
-
   /** Agents whose context actually mounted the `systemPrompt` service. */
   const promptReady = new WeakSet()
 
@@ -468,150 +435,40 @@ export function apply(ctx) {
     })
   }
 
+  const pureChatEnabled = (sessionId) => store.settingsFor(sessionId).pureChat === true
+
   /**
-   * Pure-chat Sessions still see the profile's global tools, because tools are
-   * registered globally rather than per preset. Deny every currently registered
-   * global tool in this Agent's scope so the request carries no schemas at all.
+   * Pure chat is assembled here instead of through a preset: keep this
+   * conversation's instructions, drop every other prompt section, and carry no
+   * tool schemas at all. A normal request after leaving pure chat carries the
+   * full tool list again, which rebuilds the ledger baseline.
    */
-  const toolRestricted = new WeakSet()
-  const toolDisposers = new WeakMap()
-
-  const applyPureChatTools = (agent) => {
-    if (toolRestricted.has(agent)) return
+  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
+    const downstream = await next()
     try {
-      const tools = agent.ctx.get('tools')
-      if (!tools || typeof tools.restrict !== 'function') return
-      const schemas = tools.schemas?.() ?? []
-      const names = schemas
-        .map((schema) => schema?.name)
-        .filter((name) => typeof name === 'string' && name !== '')
-      if (names.length === 0) return
-      const disposer = tools.restrict({ deny: names })
-      toolRestricted.add(agent)
-      if (typeof disposer === 'function') toolDisposers.set(agent, disposer)
-    } catch (error) {
-      store.warn(`pure-chat tool restriction failed: ${errorMessage(error)}`)
-    }
-  }
-
-  const releasePureChatTools = (agent) => {
-    const disposer = toolDisposers.get(agent)
-    if (typeof disposer === 'function') {
-      try {
-        disposer()
-      } catch {
-        // Disposal is best effort.
-      }
-    }
-    toolDisposers.delete(agent)
-    toolRestricted.delete(agent)
-  }
-
-  const isPureChatAgent = (agent) => {
-    try {
-      const presets = ctx.get('agentPresets')
-      return presets?.composedPreset?.(agent.ctx) === PURE_CHAT_PRESET
+      if (downstream === null || typeof downstream !== 'object') return downstream
+      const agent = context?.agent
+      const sessionId = agent?.id
+      if (typeof sessionId !== 'string' || !pureChatEnabled(sessionId)) return downstream
+      const text = promptAddendum(store.settingsFor(sessionId))
+      const own = Array.isArray(downstream?.sections)
+        ? downstream.sections.find((section) => section?.name === PROMPT_SECTION)
+        : undefined
+      const sections = text === ''
+        ? []
+        : [own !== undefined ? { ...own } : { name: PROMPT_SECTION, order: PROMPT_ORDER, text }]
+      return { ...downstream, sections, contexts: [], tools: [] }
     } catch {
-      return false
+      return downstream
     }
-  }
-
-  /** Register the persona-only preset that pure-chat Sessions switch to. */
-  const ensurePureChatPreset = async () => {
-    const presets = ctx.get('agentPresets')
-    if (!presets) return false
-    let list = []
-    try {
-      list = await presets.list()
-    } catch {
-      list = []
-    }
-    if (list.some((preset) => preset.id === PURE_CHAT_PRESET)) return true
-    await presets.register({
-      id: PURE_CHAT_PRESET,
-      name: '纯聊天',
-      description: '只保留系统提示与对话消息，不加载工具和环境上下文。',
-      plugins: [
-        {
-          id: 'persona',
-          name: '@deepseek-ai/dsh-persona',
-          config: {
-            // `complete` keeps ONLY this prefix as the system prompt, which is
-            // what keeps the request small; the conversation instructions ride
-            // in as a prompt variable so they still land in the system prompt.
-            prefix: `You are a helpful assistant.\n\n${PURE_CHAT_VARIABLE_TEMPLATE}`,
-            complete: true,
-            includeRuntimeContext: false,
-          },
-        },
-      ],
-    })
-    return true
-  }
-
-  ensurePureChatPreset().catch((error) => {
-    store.warn(`pure-chat preset registration failed: ${errorMessage(error)}`)
   })
 
-  /** Switch one live Session between its own preset and the pure-chat one. */
-  const switchPureChat = async (sessionId, enabled) => {
-    const presets = ctx.get('agentPresets')
-    const agent = ctx.agents.get(String(sessionId))
-    if (!presets || agent === undefined) {
-      return { ok: false, error: 'this conversation is not live; reopen it and retry' }
-    }
-    await ensurePureChatPreset()
-    const current = store.settingsFor(sessionId)
-    let previousPreset = current.previousPreset ?? null
-    let target = FALLBACK_PRESET
-    if (enabled) {
-      try {
-        const composed = presets.composedPreset?.(agent.ctx)
-        if (typeof composed === 'string' && composed !== '' && composed !== PURE_CHAT_PRESET) {
-          previousPreset = composed
-        }
-      } catch {
-        // Keep the remembered preset.
-      }
-      if (previousPreset === null || previousPreset === PURE_CHAT_PRESET) previousPreset = FALLBACK_PRESET
-      target = PURE_CHAT_PRESET
-    } else {
-      target = previousPreset !== null && previousPreset !== PURE_CHAT_PRESET ? previousPreset : FALLBACK_PRESET
-    }
-    await presets.select(agent, target)
-    refreshRequestHook(agent)
-    if (enabled) applyPureChatTools(agent)
-    else releasePureChatTools(agent)
-    const settings = store.save(sessionId, {
-      ...current,
-      pureChat: enabled,
-      previousPreset: enabled ? previousPreset : null,
-    })
-    return { ok: true, settings, preset: target }
-  }
-
-  /** Absolute log file of one Session, searched across workspace folders. */
-  const sessionLogFile = (sessionId) => {
-    const root = path.join(dshHome(), 'sessions')
-    try {
-      for (const workspace of fs.readdirSync(root)) {
-        const dir = path.join(root, workspace, String(sessionId))
-        if (!fs.existsSync(dir)) continue
-        const file = fs.readdirSync(dir).find((name) => name.endsWith('.zstd'))
-        if (file !== undefined) return path.join(dir, file)
-      }
-    } catch {
-      // Sessions root missing or unreadable.
-    }
-    return undefined
-  }
-
   /**
-   * Rewrite one logged header's `agentPreset` and leave every other event alone.
-   * Used to detach cold Sessions from the preset this plugin owns, so removing
-   * the plugin leaves no Session pointing at a preset that no longer exists.
+   * Append a final `standard` selection to one Session written by an older
+   * version. The projection replays `agent-preset/selected` events, so rewriting
+   * the header alone never moved a cold Session off the dead preset identity.
    */
-  const detachSessionPreset = (file, presetId) => {
+  const repairLegacySession = (file) => {
     const buffer = fs.readFileSync(file)
     const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
     const starts = []
@@ -633,70 +490,88 @@ export function apply(ctx) {
     }
     const rows = []
     for (const line of lines.join('').split('\n')) {
-      if (line.trim() !== '') rows.push(JSON.parse(line))
+      if (line.trim() === '') continue
+      try {
+        rows.push(JSON.parse(line))
+      } catch {
+        // A malformed row means the log is mid-write; leave it for the next run.
+        return false
+      }
     }
     if (rows.length === 0) return false
     const header = rows[0]
-    if (header?.type !== 'session') return false
-    if (header.agentPreset === presetId) return false
-    header.agentPreset = presetId
-    fs.copyFileSync(file, `${file}.detachbak-${Date.now()}`)
-    fs.writeFileSync(
-      file,
-      Buffer.concat(rows.map((row) => zlib.zstdCompressSync(Buffer.from(`${JSON.stringify(row)}\n`, 'utf8')))),
-    )
+    let selected = null
+    for (const row of rows) {
+      if (row?.type === 'agent-preset/selected') selected = row?.data?.agentPreset ?? null
+    }
+    if (selected !== LEGACY_PURE_CHAT_PRESET && header?.agentPreset !== LEGACY_PURE_CHAT_PRESET) return false
+    const last = rows[rows.length - 1]
+    if (!Number.isInteger(last?.seq)) return false
+    const event = {
+      type: 'agent-preset/selected',
+      seq: last.seq + 1,
+      time: Date.now(),
+      data: { agentPreset: 'standard' },
+    }
+    fs.appendFileSync(file, zlib.zstdCompressSync(Buffer.from(`${JSON.stringify(event)}\n`, 'utf8')))
     return true
   }
 
-  /** Move every pure-chat Session back to a normal preset, live or cold. */
-  const migratePureChatSessions = async () => {
-    const presets = ctx.get('agentPresets')
-    const result = { migrated: 0, detached: 0, skipped: 0, failed: [] }
-    for (const [sessionId, settings] of Object.entries(store.state.sessions)) {
-      if (settings?.pureChat !== true) continue
-      const previous = typeof settings.previousPreset === 'string' && settings.previousPreset !== ''
-        ? settings.previousPreset
-        : FALLBACK_PRESET
-      const clear = () => store.save(sessionId, { ...settings, pureChat: false, previousPreset: null })
-      const agent = ctx.agents.get(sessionId)
-      let refuseReason = ''
-
-      // A started Session refuses `select` outright ("This session has already
-      // started"), so the logged header is the only thing that can be moved.
-      if (agent !== undefined && presets) {
+  /**
+   * Older versions switched pure-chat Sessions to a preset and recorded that
+   * choice as an `agent-preset/selected` event. Now that the preset is gone,
+   * append a final `standard` selection so the projection no longer resolves the
+   * dead identity. Runs once per profile; live Sessions are left alone because
+   * their log is still being written.
+   */
+  const repairLegacySessions = () => {
+    if (store.state.version >= STATE_VERSION) return
+    const root = path.join(dshHome(), 'sessions')
+    let repaired = 0
+    let scanned = 0
+    let skipped = 0
+    try {
+      for (const workspace of fs.readdirSync(root)) {
+        const workspaceDir = path.join(root, workspace)
+        let entries
         try {
-          await presets.select(agent, previous)
-          clear()
-          result.migrated += 1
+          entries = fs.readdirSync(workspaceDir, { withFileTypes: true })
+        } catch {
           continue
-        } catch (error) {
-          refuseReason = errorMessage(error)
+        }
+        for (const entry of entries) {
+          if (!entry.isDirectory() || !entry.name.startsWith('session-')) continue
+          if (ctx.agents.get(entry.name) !== undefined) {
+            skipped += 1
+            continue
+          }
+          const dir = path.join(workspaceDir, entry.name)
+          let file
+          try {
+            file = fs.readdirSync(dir).find((name) => name.endsWith('.zstd'))
+          } catch {
+            skipped += 1
+            continue
+          }
+          if (file === undefined) continue
+          scanned += 1
+          try {
+            if (repairLegacySession(path.join(dir, file))) repaired += 1
+          } catch {
+            // Leave an unreadable Session for the next run.
+            skipped += 1
+          }
         }
       }
-
-      try {
-        const file = sessionLogFile(sessionId)
-        if (file === undefined) {
-          // Nothing was ever logged, so clearing the marker is all there is.
-          clear()
-          result.skipped += 1
-          continue
-        }
-        if (detachSessionPreset(file, previous)) {
-          clear()
-          result.detached += 1
-          continue
-        }
-        // The header already points at the target preset: just drop the marker.
-        clear()
-        result.skipped += 1
-      } catch (error) {
-        const detail = refuseReason === '' ? errorMessage(error) : `${refuseReason} / ${errorMessage(error)}`
-        result.failed.push(`${sessionId}: ${detail}`)
-      }
+    } catch {
+      return
     }
-    for (const line of result.failed) store.warn(`migrate: ${line}`)
-    return result
+    if (skipped === 0) {
+      store.state.version = STATE_VERSION
+      persistState(store.state)
+    }
+    if (repaired > 0) store.warn(`repaired ${repaired}/${scanned} legacy pure-chat Sessions`)
+    if (skipped > 0) store.warn(`legacy pure-chat repair deferred for ${skipped} Sessions; retrying next start`)
   }
 
   const requestHooks = new Map()
@@ -707,7 +582,6 @@ export function apply(ctx) {
    * fires for Agents composed by a preset that isolates its event routing.
    */
   const handleRequest = async (payload, next) => {
-    lastAgent = payload.agent
     let enabled = false
     try {
       // A Session the user configured explicitly always applies; the Workspace
@@ -733,15 +607,10 @@ export function apply(ctx) {
         }
       }
       if (enabled && session !== undefined) {
-        // Restrictions applied a moment ago still govern the next assembly, so
-        // re-assert them when a pure-chat Agent was rebuilt without them.
-        if (!toolRestricted.has(payload.agent) && isPureChatAgent(payload.agent)) {
-          applyPureChatTools(payload.agent)
-        }
         foldContextWindow(store, session, payload.turn, payload.step)
-        // Pure-chat Agents render the instructions through their persona
-        // variable; only non-preset Agents need the logged-message fallback.
-        let viaSystemPrompt = promptReady.has(payload.agent) || isPureChatAgent(payload.agent)
+        // Agents that mount `systemPrompt` render the instructions there; the
+        // rest fall back to a logged user message.
+        let viaSystemPrompt = promptReady.has(payload.agent)
         if (!viaSystemPrompt) {
           try {
             viaSystemPrompt = payload.agent.ctx.get('systemPrompt') !== undefined
@@ -801,11 +670,121 @@ export function apply(ctx) {
     installRequestHook(agent)
   }
 
+  /**
+   * Runtime-context contributions are assembled by `systemPrompt` after
+   * `agent/pre-step`, so filtering pre-step messages cannot remove them. Hold
+   * scoped suppressors while pure chat is on and release them when the switch
+   * goes back off. `working-directory:current` is a required context that the
+   * generic suppressor keeps, so shadow it with an empty same-name provider.
+   */
+  const runtimeSuppressors = new WeakMap()
+
+  const releasePureChatSuppressor = (agent) => {
+    const held = runtimeSuppressors.get(agent)
+    if (held === undefined) return
+    runtimeSuppressors.delete(agent)
+    for (const disposer of held) {
+      try {
+        disposer()
+      } catch {
+        // Disposal is best effort.
+      }
+    }
+  }
+
+  const syncPureChatSuppressor = (agent) => {
+    if (agent === null || typeof agent !== 'object') return
+    if (!pureChatEnabled(agent.id)) {
+      releasePureChatSuppressor(agent)
+      return
+    }
+    if (runtimeSuppressors.has(agent)) return
+    const disposers = []
+    try {
+      const systemPrompt = agent.ctx.get('systemPrompt')
+      if (typeof systemPrompt?.suppressRuntimeContext === 'function') {
+        const disposer = systemPrompt.suppressRuntimeContext()
+        if (typeof disposer === 'function') disposers.push(disposer)
+      }
+      if (typeof systemPrompt?.context === 'function') {
+        const order = typeof systemPrompt.getContextOrder === 'function'
+          ? systemPrompt.getContextOrder('WORKING_DIRECTORY')
+          : 0
+        const disposer = systemPrompt.context({
+          name: 'working-directory:current',
+          order,
+          required: false,
+          interpolate: false,
+          text: () => '',
+        })
+        if (typeof disposer === 'function') disposers.push(disposer)
+      }
+      if (disposers.length === 0) return
+      runtimeSuppressors.set(agent, disposers)
+    } catch (error) {
+      for (const disposer of disposers) {
+        try {
+          disposer()
+        } catch {
+          // Roll back what was installed before the failure.
+        }
+      }
+      store.warn(`pure-chat runtime suppression failed: ${errorMessage(error)}`)
+    }
+  }
+
+  /**
+   * Runtime and time context are appended by other `agent/pre-step` listeners.
+   * Register in the Agent's own scope with `prepend` so this listener runs before
+   * them and sees their additions on the way back out.
+   */
+  const preStepFibers = new WeakMap()
+
+  const installPreStep = (agent) => {
+    if (preStepFibers.has(agent)) return
+    try {
+      const fiber = agent.ctx.effect(
+        () => agent.ctx.on('agent/pre-step', async ({ agent: current }, next) => {
+          const decision = await next()
+          try {
+            if (decision === null || typeof decision !== 'object') return decision
+            if (decision.kind === 'reject' || !Array.isArray(decision.messages)) return decision
+            const sessionId = current?.id
+            if (typeof sessionId !== 'string' || !pureChatEnabled(sessionId)) return decision
+            const messages = decision.messages.filter((message) => {
+              const source = message?.source
+              if (source === null || typeof source !== 'object') return true
+              if (source.kind === 'runtime-context' && source.form === 'snapshot') return false
+              if (source.kind === 'skill-catalog' && source.form === 'catalog') return false
+              return !STRIPPED_SOURCE_KINDS.has(source.kind)
+            })
+            if (messages.length === decision.messages.length) return decision
+            return { ...decision, messages }
+          } catch {
+            return decision
+          }
+        }, { prepend: true }),
+        `${PLUGIN}: pure-chat pre-step`,
+      )
+      preStepFibers.set(agent, fiber)
+    } catch (error) {
+      store.warn(`pure-chat pre-step hook failed: ${errorMessage(error)}`)
+    }
+  }
+
+  const disposePreStep = (agent) => {
+    const fiber = preStepFibers.get(agent)
+    if (fiber === undefined) return
+    preStepFibers.delete(agent)
+    Promise.resolve(fiber?.dispose?.()).catch(() => {})
+  }
+
   const installAgent = (agent) => {
     try {
       installPrompt(agent)
       installRequestHook(agent)
-      if (isPureChatAgent(agent)) applyPureChatTools(agent)
+      installPreStep(agent)
+      syncPureChatSuppressor(agent)
     } catch (error) {
       // Never let this plugin's bookkeeping abort an Agent creation.
       store.warn(`install failed for ${agent?.id}: ${errorMessage(error)}`)
@@ -820,7 +799,11 @@ export function apply(ctx) {
     try {
       ctx.setTimeout?.(() => {
         try {
-          if (ctx.agents.get(agent.id) === agent) refreshRequestHook(agent)
+          if (ctx.agents.get(agent.id) === agent) {
+            refreshRequestHook(agent)
+            installPreStep(agent)
+            syncPureChatSuppressor(agent)
+          }
         } catch {
           // Best effort.
         }
@@ -833,7 +816,8 @@ export function apply(ctx) {
   ctx.on('agent/disposed', ({ agent }) => {
     disposePrompt(agent)
     disposeRequestHook(agent)
-    releasePureChatTools(agent)
+    disposePreStep(agent)
+    releasePureChatSuppressor(agent)
   })
 
   ctx.effect(() => () => {
@@ -845,23 +829,15 @@ export function apply(ctx) {
       })
     }
     for (const agent of [...requestHooks.keys()]) disposeRequestHook(agent)
-    // Unload leaves nothing behind: cold pure-chat Sessions drop back to a
-    // normal preset before this plugin's preset row disappears from the loader.
-    try {
-      for (const [sessionId, settings] of Object.entries(store.state.sessions)) {
-        if (settings?.pureChat !== true) continue
-        if (ctx.agents.get(sessionId) !== undefined) continue
-        const previous = typeof settings.previousPreset === 'string' && settings.previousPreset !== ''
-          ? settings.previousPreset
-          : FALLBACK_PRESET
-        const file = sessionLogFile(sessionId)
-        if (file !== undefined) detachSessionPreset(file, previous)
-        store.save(sessionId, { ...settings, pureChat: false, previousPreset: null })
-      }
-    } catch {
-      // Detaching is best effort during unload.
-    }
   }, `${PLUGIN}: prompt cleanup`)
+
+  // One-time repair for Sessions written by the preset-based version. It only
+  // appends an event, never rewrites an existing log, and is idempotent.
+  try {
+    repairLegacySessions()
+  } catch (error) {
+    store.warn(`legacy Session repair failed: ${errorMessage(error)}`)
+  }
 
   /**
    * The same plugin can be mounted twice (bundle row plus a market hot tree),
@@ -900,6 +876,7 @@ export function apply(ctx) {
           const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
           if (sessionId === '') return writeJson({ ok: false, error: 'missing sessionId' }, 400)
           const settings = store.save(sessionId, body?.settings ?? {})
+          syncPureChatSuppressor(ctx.agents.get(sessionId))
           return writeJson({ ok: true, settings, configured: !isDefaultSettings(settings) })
         } catch (error) {
           return writeJson({ ok: false, error: errorMessage(error) }, 500)
@@ -955,36 +932,5 @@ export function apply(ctx) {
         }
       },
     }, 'workspaces route')
-
-    registerRoute(scope, {
-      path: PURE_CHAT_ROUTE,
-      methods: ['POST'],
-      requestBody: 'buffered',
-      fetch: async (request) => {
-        try {
-          const body = await request.json().catch(() => ({}))
-          const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
-          if (sessionId === '') return writeJson({ ok: false, error: 'missing sessionId' }, 400)
-          const result = await switchPureChat(sessionId, body?.enabled === true)
-          return writeJson(result, result.ok ? 200 : 400)
-        } catch (error) {
-          return writeJson({ ok: false, error: errorMessage(error) }, 500)
-        }
-      },
-    }, 'pure chat route')
-
-    registerRoute(scope, {
-      path: MIGRATE_ROUTE,
-      methods: ['POST'],
-      requestBody: 'buffered',
-      fetch: async () => {
-        try {
-          const result = await migratePureChatSessions()
-          return writeJson({ ok: true, ...result })
-        } catch (error) {
-          return writeJson({ ok: false, error: errorMessage(error) }, 500)
-        }
-      },
-    }, 'migrate route')
   })
 }
